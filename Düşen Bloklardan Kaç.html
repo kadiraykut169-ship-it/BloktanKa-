@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0,user-scalable=no">
+  <title>Düşen Bloklardan Kaç (Mobil Destekli)</title>
+  <style>
+    :root { --ui-size: 14px; }
+    html,body { margin:0; padding:0; height:100%; background:#333; color:#fff; font-family:Arial, sans-serif; -webkit-tap-highlight-color: transparent; }
+    #gameWrap { position:relative; max-width:900px; margin:8px auto; }
+    canvas { display:block; background:#fff; width:100%; height:auto; border-radius:8px; }
+    /* Dokunmatik kontrol butonları */
+    .btn {
+      position:fixed;
+      bottom:18px;
+      width:18%;
+      max-width:120px;
+      height:14%;
+      max-height:120px;
+      border-radius:14px;
+      background: rgba(0,0,0,0.5);
+      color:#fff;
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      font-size:1.4rem;
+      user-select:none;
+      touch-action:none;
+    }
+    #leftBtn { left:6px; }
+    #rightBtn { right:6px; }
+    #info {
+      text-align:center;
+      margin-bottom:6px;
+      font-size:0.95rem;
+    }
+    #overlayMsg {
+      position:absolute;
+      left:0; top:0; right:0; bottom:0;
+      display:flex; align-items:center; justify-content:center;
+      pointer-events:none;
+      font-size:2rem; color:black; text-shadow:0 1px 0 #fff;
+    }
+    @media (min-width:700px) {
+      .btn { display:none; } /* masaüstünde gizle */
+    }
+  </style>
+</head>
+<body>
+  <div id="info">Ok tuşları / sol-sağ butonları ile hareket et. Mobilde butonlara basılı tut.</div>
+  <div id="gameWrap">
+    <canvas id="game"></canvas>
+    <div id="overlayMsg"></div>
+  </div>
+
+  <!-- Dokunmatik butonlar (sadece mobilde görünür) -->
+  <div id="leftBtn" class="btn">◀</div>
+  <div id="rightBtn" class="btn">▶</div>
+
+<script>
+(() => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlayMsg');
+
+  // Dinamik boyutlandırma (mantıksal koordinatlar canvas boyutuna göre)
+  function resizeCanvas() {
+    // Mantıksal çözünürlük olarak genişlik 400 ile 900 arasında, yüksekliği oranla ayarla
+    const maxWidth = Math.min(window.innerWidth - 16, 900);
+    canvas.style.width = maxWidth + 'px';
+    // set actual pixel size to preserve sharpness
+    const dpr = window.devicePixelRatio || 1;
+    const logicalW = 400; // mantıksal koordinat genişliği
+    const scale = maxWidth / logicalW;
+    canvas.width = Math.floor(logicalW * dpr);
+    canvas.height = Math.floor(600 * scale * dpr);
+    canvas.style.height = (600 * scale) + 'px';
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0); // scale drawing to DPR
+  }
+  window.addEventListener('resize', resizeCanvas);
+  resizeCanvas();
+
+  // Oyun nesneleri (pozisyonlar mantıksal koordinatlarla çalışır: 400x600)
+  let logicalW = 400;
+  let logicalH = 600;
+
+  let player = {
+    w: 40,
+    h: 40,
+    x: (logicalW - 40) / 2,
+    y: logicalH - 50,
+    color: 'blue',
+    speed: 6
+  };
+
+  let blocks = [];
+  let spawnInterval = 900; // ms
+  let lastSpawn = 0;
+  let gameOver = false;
+  let score = 0;
+  let speed = 2.5;
+
+  // Hareket kontroller
+  let moveLeft = false, moveRight = false;
+  const keys = {};
+  document.addEventListener('keydown', e => {
+    keys[e.key] = true;
+    if (e.key === 'ArrowLeft') moveLeft = true;
+    if (e.key === 'ArrowRight') moveRight = true;
+    // restart when game over
+    if (gameOver && (e.key === 'Enter' || e.key === ' ')) restart();
+  });
+  document.addEventListener('keyup', e => {
+    keys[e.key] = false;
+    if (e.key === 'ArrowLeft') moveLeft = false;
+    if (e.key === 'ArrowRight') moveRight = false;
+  });
+
+  // Mobil butonlar
+  const leftBtn = document.getElementById('leftBtn');
+  const rightBtn = document.getElementById('rightBtn');
+
+  // helper to handle pointer events (works for touch & mouse)
+  function addPointerHold(el, onStart, onEnd) {
+    let active = false;
+    el.addEventListener('pointerdown', (ev) => { ev.preventDefault(); active = true; onStart(); el.setPointerCapture(ev.pointerId); });
+    el.addEventListener('pointerup', (ev) => { active = false; onEnd(); });
+    el.addEventListener('pointercancel', () => { active = false; onEnd(); });
+    el.addEventListener('pointerleave', () => { if (active) { active = false; onEnd(); }});
+  }
+
+  addPointerHold(leftBtn, () => moveLeft = true, () => moveLeft = false);
+  addPointerHold(rightBtn, () => moveRight = true, () => moveRight = false);
+
+  // Dokunmatik restart (oyun bittiğinde)
+  canvas.addEventListener('pointerdown', (e) => {
+    if (gameOver) restart();
+  });
+
+  // Blok üretimi
+  function spawnBlock() {
+    const bW = 40;
+    const x = Math.floor(Math.random() * (logicalW - bW));
+    blocks.push({ x, y: -bW, w: bW, h: bW, speed: speed + Math.random() * 1.5 });
+  }
+
+  // Çarpışma kontrolü
+  function collide(a, b) {
+    return a.x < b.x + b.w && a.x + a.w > b.x &&
+           a.y < b.y + b.h && a.y + a.h > b.y;
+  }
+
+  // Restart fonksiyonu
+  function restart() {
+    blocks = [];
+    score = 0;
+    gameOver = false;
+    player.x = (logicalW - player.w) / 2;
+    lastSpawn = performance.now();
+    overlay.innerText = '';
+    requestAnimationFrame(loop);
+  }
+
+  // Oyun döngüsü
+  let lastTime = performance.now();
+  function loop(now) {
+    const dt = now - lastTime;
+    lastTime = now;
+
+    // Resize canvas logical sizes if CSS changed (keşke sabit olsaydı ama güvenli)
+    // (Mantıksal koordinatlar sabit 400x600 kullandık; canvas transform ile ölçeklendik)
+
+    if (!gameOver) {
+      // spawn
+      if (now - lastSpawn > spawnInterval) {
+        spawnBlock();
+        lastSpawn = now;
+        // zamanla hız artışı
+        if (spawnInterval > 350) spawnInterval *= 0.995;
+      }
+
+      // hareket
+      if (moveLeft || keys['a']) player.x -= player.speed;
+      if (moveRight || keys['d']) player.x += player.speed;
+      // sınırlar
+      if (player.x < 0) player.x = 0;
+      if (player.x + player.w > logicalW) player.x = logicalW - player.w;
+
+      // blokları güncelle
+      for (let i = blocks.length - 1; i >= 0; i--) {
+        const b = blocks[i];
+        b.y += b.speed;
+        // çarpma
+        if (collide(player, b)) {
+          gameOver = true;
+          overlay.innerText = 'Game Over! Dokun veya Enter ile yeniden başla\nSkor: ' + score;
+        }
+        // sahadan çıktıysa
+        if (b.y > logicalH + 50) {
+          blocks.splice(i, 1);
+          score += 10;
+          // zorluk artışı
+          if (score % 100 === 0) {
+            speed += 0.3;
+          }
+        }
+      }
+    }
+
+    // çizim (mantıksal 400x600 içinde)
+    // clear
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    // transform back to logical coordinate space (we used setTransform with DPR earlier; drawing coordinates are logical)
+    // draw background
+    ctx.save();
+    // White background already by CSS but clearRect with white fill for consistent visuals
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, logicalW, logicalH);
+
+    // player
+    ctx.fillStyle = player.color;
+    ctx.fillRect(player.x, player.y, player.w, player.h);
+
+    // blocks
+    ctx.fillStyle = 'red';
+    for (const b of blocks) {
+      ctx.fillRect(b.x, b.y, b.w, b.h);
+    }
+
+    // skor
+    ctx.fillStyle = 'black';
+    ctx.font = '16px Arial';
+    ctx.fillText('Skor: ' + score, 10, 24);
+
+    // overlay mesaj if gameOver already set above
+    ctx.restore();
+
+    if (!gameOver) {
+      requestAnimationFrame(loop);
+    }
+  }
+
+  // Başlangıç
+  // normalize logical sizes for gameplay (we fixed logicalW/logicalH; ensure player/block placement uses them)
+  // If canvas CSS width changed, drawing still scales — we used setTransform to handle devicePixelRatio.
+  // Kick off
+  lastSpawn = performance.now();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
